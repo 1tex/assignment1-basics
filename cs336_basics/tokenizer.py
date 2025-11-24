@@ -40,9 +40,9 @@ class BPETokenizer:
         
         # Pre-tokenization pattern (GPT-2 style)
         # Splits on whitespace and keeps punctuation separate
+        # Pre-tokenization pattern (GPT-2 style)
         self.pattern = re.compile(
-            r"""'(?:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+""",
-            re.IGNORECASE
+            r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""",
         )
         
         # Build special token pattern if we have special tokens
@@ -191,22 +191,38 @@ def train_bpe(
     """
     # Pre-tokenization pattern (GPT-2 style)
     pattern = re.compile(
-        r"""'(?:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+""",
-        re.IGNORECASE
+        r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""",
     )
     
-    # Read and pre-tokenize corpus
+    # Read corpus
     with open(input_path, 'r', encoding='utf-8') as f:
         text = f.read()
     
-    # Pre-tokenize into words
-    words = pattern.findall(text)
-    
-    # Convert words to byte sequences
+    # 1. Handle special tokens: split text by special tokens so we don't tokenize them
+    if special_tokens:
+        # Sort by length descending to handle overlapping tokens
+        sorted_special = sorted(special_tokens, key=len, reverse=True)
+        # Escape for regex
+        special_pattern = '|'.join(re.escape(s) for s in sorted_special)
+        # Split: keep delimiters (special tokens) to verify, but we only process non-special chunks
+        chunks = re.split(f'({special_pattern})', text)
+    else:
+        chunks = [text]
+
+    # 2. Pre-tokenize non-special chunks into words
     word_counts = Counter()
-    for word in words:
-        word_bytes = word.encode('utf-8')
-        word_counts[word_bytes] += 1
+    for chunk in chunks:
+        # Skip if it's a special token
+        if chunk in special_tokens:
+            continue
+        if not chunk:
+            continue
+            
+        # Find words in this chunk
+        words = pattern.findall(chunk)
+        for word in words:
+            word_bytes = word.encode('utf-8')
+            word_counts[word_bytes] += 1
     
     # Initialize vocabulary with all bytes
     vocab = {i: bytes([i]) for i in range(256)}
@@ -227,14 +243,14 @@ def train_bpe(
     # Split words into tokens (initially individual bytes)
     word_tokens = {}
     for word_bytes, count in word_counts.items():
-        tokens = tuple(bytes([b]) for b in word_bytes)
-        word_tokens[word_bytes] = (tokens, count)
+        tokens = list(bytes([b]) for b in word_bytes)
+        word_tokens[word_bytes] = [tokens, count] # Use list for mutability
     
     # Perform BPE merges
     for _ in range(num_merges):
         # Count all adjacent pairs
         pair_counts = Counter()
-        for word_bytes, (tokens, count) in word_tokens.items():
+        for tokens, count in word_tokens.values():
             for i in range(len(tokens) - 1):
                 pair = (tokens[i], tokens[i + 1])
                 pair_counts[pair] += count
@@ -254,8 +270,8 @@ def train_bpe(
         next_id += 1
         
         # Update word tokens with the merge
-        new_word_tokens = {}
-        for word_bytes, (tokens, count) in word_tokens.items():
+        for word_bytes in word_tokens:
+            tokens, count = word_tokens[word_bytes]
             new_tokens = []
             i = 0
             while i < len(tokens):
@@ -266,8 +282,7 @@ def train_bpe(
                 else:
                     new_tokens.append(tokens[i])
                     i += 1
-            new_word_tokens[word_bytes] = (tuple(new_tokens), count)
-        word_tokens = new_word_tokens
+            word_tokens[word_bytes][0] = new_tokens
     
     return vocab, merges
 
